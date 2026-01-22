@@ -1,0 +1,39 @@
+# Virtual Environment
+cvenv/
+venv/
+env/
+.venv/
+
+# Environment variables (NEVER commit .env with secrets)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+CVPerfect FRD.docx
+parsing_data.json
+parsing_log.json
+filtered_output
