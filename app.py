@@ -316,7 +316,10 @@ If you can't find a mobile number or email, respond with 'Mobile: N/A' or 'Email
         
         "Business Research": f"""You are an expert ATS scanner specialized in Business Research recruitment. Evaluate the resume against the job description with comprehensive analysis of market research, competitive intelligence, and strategic planning. For {mode.upper()} mode, assess the candidate's proficiency in Market Research, Industry Analysis, Competitive Intelligence, Business Strategy, Financial Analysis, Data Interpretation, Trend Analysis, Feasibility Studies, Secondary Research, Primary Research, Forecasting, SWOT Analysis.""",
         
-        "Digital Marketing": f"""You are an advanced ATS scanner specialized in Digital Marketing recruitment. Evaluate the resume against the job description with precision and depth. For {mode.upper()} mode, assess the candidate's expertise in Search Engine Optimization (SEO) including on-page and off-page strategies, organic traffic growth, content creation and management (blogs, articles, infographics, images, videos), and digital brand building. Evaluate experience in managing and optimizing paid advertising campaigns across Google Ads, LinkedIn Ads, and Facebook Ads, including ad copy creation, landing page optimization, performance tracking, ROI and KPI measurement. Assess proficiency in website management using WordPress, basic HTML knowledge, social media marketing across platforms such as LinkedIn, Facebook, Twitter, and coordination with third-party marketing agencies. Consider skills in lead generation, inbound marketing, branding, campaign reporting, communication abilities, ability to work independently under tight deadlines, and prior exposure to BFSI, media, advertising, PR, or publishing industries."""
+        "Digital Marketing": f"""You are an advanced ATS scanner specialized in Digital Marketing recruitment. Evaluate the resume against the job description with precision and depth. For {mode.upper()} mode, assess the candidate's expertise in Search Engine Optimization (SEO) including on-page and off-page strategies, organic traffic growth, content creation and management (blogs, articles, infographics, images, videos), and digital brand building. Evaluate experience in managing and optimizing paid advertising campaigns across Google Ads, LinkedIn Ads, and Facebook Ads, including ad copy creation, landing page optimization, performance tracking, ROI and KPI measurement. Assess proficiency in website management using WordPress, basic HTML knowledge, social media marketing across platforms such as LinkedIn, Facebook, Twitter, and coordination with third-party marketing agencies. Consider skills in lead generation, inbound marketing, branding, campaign reporting, communication abilities, ability to work independently under tight deadlines, and prior exposure to BFSI, media, advertising, PR, or publishing industries.""",
+        
+        "TEV Analyst": f"""You are an advanced ATS scanner specialized in Project Finance and Credit Research recruitment. Evaluate the resume against the job description with precision and depth. For {mode.upper()} mode, assess the candidate's expertise in Project Finance, Credit Appraisal, and Financial Advisory. Evaluate experience in preparation of Techno Economic Viability (TEV) Reports, Detailed Project Reports (DPRs), Lenders’ Independent Engineer (LIE) Reports, Debt Restructuring Studies, and Project Finance cashflow models for infrastructure and industrial projects. Assess proficiency in advanced Excel-based financial modeling, including project cash flows, debt structuring, sensitivity analysis, and financial viability assessment based on raw data and assumptions. Review experience in drafting Information Memoranda (IMs) and credit appraisal notes for banks, NBFCs, and investors. Evaluate ability to validate technical and financial assumptions using market intelligence, sectoral research, and industry benchmarking. Consider exposure to site visits, technical due diligence, project execution assessment (costs, timelines, risks), and coordination with stakeholders such as lenders, TEV/LIE consultants, valuers, legal advisors, and technical experts. Assess understanding of the Indian lending ecosystem including PSU banks, private sector banks, and NBFCs. Additionally, evaluate client-handling skills, relationship management with financial institutions and corporates, presentation capabilities during lender appraisals, ability to manage multiple projects independently under tight deadlines, regulatory compliance awareness, MIS reporting, and willingness to travel extensively across India."""
+
     }
     
     # Default prompt if no role is selected
@@ -767,7 +770,7 @@ st.markdown("### Select Role for Resume Evaluation")
 if "selected_role" not in st.session_state:
     st.session_state.selected_role = None
 
-col1, col2, col3, col4, col5, col6, col7, col8, col9, col10 = st.columns(10)
+col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11 = st.columns(11)
 if col1.button("AI Specialist"):
     st.session_state.selected_role = "AI Specialist"
 if col2.button("Data Scientist"):
@@ -790,6 +793,8 @@ if col10.button("Business Research"):
     st.session_state.selected_role = "Business Research"
 if col10.button("Digital Marketing"):
     st.session_state.selected_role = "Digital Marketing"
+if col11.button("TEV Analyst"):
+    st.session_state.selected_role = "TEV Analyst"
 
 if st.session_state.selected_role:
     st.info(f"Selected Role: {st.session_state.selected_role}")
