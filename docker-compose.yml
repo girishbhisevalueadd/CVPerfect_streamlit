@@ -1,3 +1,5 @@
+name: cvperfect_streamlit
+
 services:
   cvperfect:
     build: .
