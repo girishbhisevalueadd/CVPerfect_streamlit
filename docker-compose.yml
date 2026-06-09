@@ -1,10 +1,22 @@
 version: '3.8'
 
 services:
-  streamlit:
+  cvperfect:
     build: .
+    container_name: cvperfect
     ports:
       - "8501:8501"
+    env_file:
+      - .env
     volumes:
-      - .:/app
+      - ./parsing_log.json:/app/parsing_log.json
+      - ./parsing_data.json:/app/parsing_data.json
+      - ./app.log:/app/app.log
+      - ./filtered_output:/app/filtered_output
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
