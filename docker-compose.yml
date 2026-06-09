@@ -1,7 +1,7 @@
 services:
   cvperfect:
     build: .
-    container_name: cvperfect
+    container_name: cvperfect_streamlit
     ports:
       - "8501:8501"
     env_file:
