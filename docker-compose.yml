@@ -12,6 +12,7 @@ services:
       - ./parsing_log.json:/app/parsing_log.json
       - ./parsing_data.json:/app/parsing_data.json
       - ./app.log:/app/app.log
+      - ./errors.log:/app/errors.log
       - ./filtered_output:/app/filtered_output
     restart: unless-stopped
     healthcheck:

@@ -30,27 +30,75 @@ warnings.filterwarnings("ignore", category=UserWarning, message="CropBox missing
 
 load_dotenv()
 
-# Configure logging to a JSON file for parsing attempts
-logging.basicConfig(
-    filename='parsing_log.json',
-    level=logging.INFO,
-    format='%(message)s'
+# ===== Detailed Logging Setup =====
+LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FORMAT = (
+    '%(asctime)s | %(levelname)-8s | %(threadName)-12s | '
+    '%(name)s | %(funcName)s:%(lineno)d | %(message)s'
 )
+LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-# Configure separate loggers for different types of output
-# 1. JSON Logger for parsing attempts
+# Quiet noisy third-party loggers (they spam DEBUG with internal junk)
+for _noisy in (
+    'pdfminer', 'pdfminer.pdfdocument', 'pdfminer.pdfinterp',
+    'pdfminer.pdfpage', 'pdfminer.cmapdb', 'pdfminer.psparser',
+    'pdfminer.converter', 'pdfplumber', 'PIL', 'PIL.PngImagePlugin',
+    'urllib3', 'urllib3.connectionpool',
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+_formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+
+# Main detailed log — every DEBUG+ message
+_app_log_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, 'app.log'),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8',
+)
+_app_log_handler.setLevel(logging.DEBUG)
+_app_log_handler.setFormatter(_formatter)
+
+# Errors-only log with full tracebacks for quick triage
+_error_log_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, 'errors.log'),
+    maxBytes=5 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8',
+)
+_error_log_handler.setLevel(logging.ERROR)
+_error_log_handler.setFormatter(_formatter)
+
+# Console handler — visible in `docker logs` / `streamlit run` stdout
+_console_handler = logging.StreamHandler()
+_console_handler.setLevel(logging.INFO)
+_console_handler.setFormatter(_formatter)
+
+# Application logger — DEBUG level, no propagation to root
+app_logger = logging.getLogger('cvperfect')
+app_logger.setLevel(logging.DEBUG)
+app_logger.handlers.clear()
+app_logger.addHandler(_app_log_handler)
+app_logger.addHandler(_error_log_handler)
+app_logger.addHandler(_console_handler)
+app_logger.propagate = False
+
+# Separate JSON logger for the per-parse audit trail (parsing_data.json)
 json_logger = logging.getLogger('json_logger')
 json_logger.setLevel(logging.INFO)
-json_handler = RotatingFileHandler('parsing_data.json', maxBytes=10485760, backupCount=5)
-json_logger.addHandler(json_handler)
-json_logger.propagate = False  # Don't send to root logger
+json_logger.handlers.clear()
+_json_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, 'parsing_data.json'),
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
+    encoding='utf-8',
+)
+json_logger.addHandler(_json_handler)
+json_logger.propagate = False
 
-# 2. Regular logger for other messages
-app_logger = logging.getLogger('app_logger')
-app_logger.setLevel(logging.INFO)
-app_handler = RotatingFileHandler('app.log', maxBytes=10485760, backupCount=5)
-app_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-app_logger.addHandler(app_handler)
+app_logger.info('=' * 70)
+app_logger.info('CVPerfect application starting | PID=%s | LOG_DIR=%s', os.getpid(), LOG_DIR)
+app_logger.info('=' * 70)
 
 # DeepSeek API configuration
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -182,105 +230,202 @@ def retry(max_attempts=5, initial_delay=2, backoff=2, max_timeout=60):
             attempts = 0
             delay = initial_delay
             timeout = 30  # Start with default timeout
-            
+
             while attempts < max_attempts:
                 try:
                     # Increase timeout with each retry
                     if 'timeout' in kwargs:
                         kwargs['timeout'] = min(timeout, max_timeout)
-                    
+
                     return func(*args, **kwargs)
                 except Exception as e:
                     attempts += 1
                     if attempts == max_attempts:
-                        app_logger.error(f"Maximum retry attempts ({max_attempts}) reached. Last error: {str(e)}")
+                        app_logger.error(
+                            "Maximum retry attempts (%s) reached for %s. Last error: %s",
+                            max_attempts, func.__name__, e, exc_info=True,
+                        )
                         raise
-                    
-                    logging.warning(f"API request failed (attempt {attempts}/{max_attempts}). Retrying in {delay}s...")
+
+                    app_logger.warning(
+                        "%s failed (attempt %s/%s): %s. Retrying in %ss...",
+                        func.__name__, attempts, max_attempts, e, delay,
+                    )
                     time.sleep(delay)
                     delay *= backoff
                     timeout *= 1.5  # Increase timeout for next attempt
-            
+
             return None  # Should never reach here
         return wrapper
     return decorator_retry
 
+
+# ===== Function-level logging decorator =====
+def _summarize_value(v):
+    """Compact, safe repr for log lines — never dumps file bytes or huge strings."""
+    try:
+        if isinstance(v, (list, tuple, set)):
+            return f"<{type(v).__name__} len={len(v)}>"
+        if isinstance(v, dict):
+            keys = list(v.keys())
+            shown = keys[:8]
+            more = f"+{len(keys) - 8}" if len(keys) > 8 else ""
+            return f"<dict keys={shown}{more}>"
+        if isinstance(v, (bytes, bytearray)):
+            return f"<bytes len={len(v)}>"
+        if hasattr(v, 'name') and hasattr(v, 'getvalue'):
+            try:
+                return f"<UploadedFile name={v.name!r} size={len(v.getvalue())}>"
+            except Exception:
+                return f"<UploadedFile name={v.name!r}>"
+        if hasattr(v, 'name'):
+            return f"<{type(v).__name__} name={v.name!r}>"
+        if isinstance(v, str):
+            return repr(v) if len(v) <= 120 else repr(v[:120]) + f'... (+{len(v) - 120} chars)'
+        s = repr(v)
+        return s if len(s) <= 200 else s[:200] + '...'
+    except Exception:
+        return f"<{type(v).__name__}>"
+
+
+def log_call(func):
+    """Log function entry (args summary), exit (duration + result summary), and exceptions with traceback."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        fname = func.__name__
+        arg_part = ", ".join(_summarize_value(a) for a in args)
+        kwarg_part = ", ".join(f"{k}={_summarize_value(v)}" for k, v in kwargs.items())
+        sep = ", " if arg_part and kwarg_part else ""
+        app_logger.debug("-> ENTER %s(%s%s%s)", fname, arg_part, sep, kwarg_part)
+        start = time.time()
+        try:
+            result = func(*args, **kwargs)
+            duration = time.time() - start
+            app_logger.debug("<- EXIT  %s duration=%.3fs result=%s",
+                             fname, duration, _summarize_value(result))
+            return result
+        except Exception as e:
+            duration = time.time() - start
+            app_logger.error(
+                "!! ERROR in %s after %.3fs: %s: %s",
+                fname, duration, type(e).__name__, e, exc_info=True,
+            )
+            raise
+    return wrapper
+
 # --- Extraction functions ---
 
+@log_call
 def detect_file_type(file_bytes):
     """Detect the file type using python-magic."""
     file_type = magic.from_buffer(file_bytes.read(2048), mime=True)
     file_bytes.seek(0)
+    app_logger.debug("Detected MIME type: %s", file_type)
     return file_type
 
+@log_call
 def extract_pdf_vector(uploaded_file):
     """Extract text using pdfplumber (vector/text layer) from a PDF."""
     try:
         with pdfplumber.open(uploaded_file) as pdf:
+            page_count = len(pdf.pages)
             text = "\n".join([page.extract_text() or "" for page in pdf.pages])
-        return text.strip()
+        result = text.strip()
+        app_logger.info("Vector extract %s: pages=%s chars=%s",
+                        uploaded_file.name, page_count, len(result))
+        return result
     except Exception as e:
-        app_logger.error(f"Vector extraction error for {uploaded_file.name}: {str(e)}")
+        app_logger.error("Vector extraction error for %s: %s",
+                         uploaded_file.name, e, exc_info=True)
         return ""
 
+@log_call
 def extract_pdf_ocr(uploaded_file):
     """Extract text using OCR from a PDF by converting pages to images."""
     try:
         text = ""
         with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
+            page_count = len(pdf.pages)
+            for idx, page in enumerate(pdf.pages, start=1):
+                page_start = time.time()
                 im = page.to_image(resolution=300).original
                 open_cv_image = cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
                 gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
-                text += pytesseract.image_to_string(gray) + "\n"
-        return text.strip()
+                page_text = pytesseract.image_to_string(gray)
+                text += page_text + "\n"
+                app_logger.debug("OCR page %s/%s of %s: chars=%s duration=%.3fs",
+                                 idx, page_count, uploaded_file.name,
+                                 len(page_text), time.time() - page_start)
+        result = text.strip()
+        app_logger.info("OCR extract %s: pages=%s chars=%s",
+                        uploaded_file.name, page_count, len(result))
+        return result
     except Exception as e:
-        app_logger.error(f"OCR extraction error for {uploaded_file.name}: {str(e)}")
+        app_logger.error("OCR extraction error for %s: %s",
+                         uploaded_file.name, e, exc_info=True)
         return ""
 
+@log_call
 def extract_docx_text(uploaded_file):
     """Extract text from DOCX file with style retention."""
     try:
         doc = Document(uploaded_file)
         text = "\n".join([para.text for para in doc.paragraphs])
-        return text.strip()
+        result = text.strip()
+        app_logger.info("DOCX extract %s: paragraphs=%s chars=%s",
+                        uploaded_file.name, len(doc.paragraphs), len(result))
+        return result
     except Exception as e:
-        app_logger.error(f"DOCX extraction error for {uploaded_file.name}: {str(e)}")
+        app_logger.error("DOCX extraction error for %s: %s",
+                         uploaded_file.name, e, exc_info=True)
         return ""
 
+@log_call
 def extract_image_text(uploaded_file):
     """Extract text from image using Tesseract OCR with adaptive preprocessing."""
     try:
         image = Image.open(uploaded_file)
+        app_logger.debug("Image %s: size=%s mode=%s", uploaded_file.name, image.size, image.mode)
         open_cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
         processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                           cv2.THRESH_BINARY, 11, 2)
         text = pytesseract.image_to_string(processed)
-        return text.strip()
+        result = text.strip()
+        app_logger.info("Image OCR extract %s: chars=%s",
+                        uploaded_file.name, len(result))
+        return result
     except Exception as e:
-        app_logger.error(f"Image OCR extraction error for {uploaded_file.name}: {str(e)}")
+        app_logger.error("Image OCR extraction error for %s: %s",
+                         uploaded_file.name, e, exc_info=True)
         return ""
 
+@log_call
 def extract_text(uploaded_file):
     """Determine file type and extract text accordingly."""
     file_bytes = uploaded_file.getvalue()
     file_type = detect_file_type(uploaded_file)
-    
+    app_logger.info("extract_text dispatch %s: type=%s size=%s bytes",
+                    uploaded_file.name, file_type, len(file_bytes))
+
     if 'pdf' in file_type:
         text = extract_pdf_vector(uploaded_file)
         if not text:
+            app_logger.info("Vector extract empty for %s, falling back to OCR", uploaded_file.name)
             text = extract_pdf_ocr(uploaded_file)
     elif 'msword' in file_type or 'officedocument' in file_type:
         text = extract_docx_text(uploaded_file)
     elif 'image' in file_type:
         text = extract_image_text(uploaded_file)
     else:
+        app_logger.warning("Unsupported file type %s for %s; falling back to filename",
+                           file_type, uploaded_file.name)
         st.warning(f"Unsupported file type ({file_type}). Falling back to metadata analysis.")
         text = uploaded_file.name  # fallback using filename as metadata
     return text
 
 # --- Role-Specific Prompt Builder ---
+@log_call
 def get_role_specific_prompt(role, job_description, resume_text, mode, include_contact_info=False):
     """
     Build a role-specific prompt for ATS resume evaluation.
@@ -349,27 +494,39 @@ Resume Content:
 
 
 # --- DeepSeek API call with retry and rate limit ---
+@log_call
 @rate_limit(max_calls=5, period=60)
 @retry(max_attempts=5, initial_delay=2, backoff=2, max_timeout=90)
 def get_deepseek_response(prompt):
     """Get response from DeepSeek API with enhanced reliability."""
+    original_len = len(prompt)
     # Trim the prompt if it's very long to reduce processing time
-    if len(prompt) > 8000:
+    if original_len > 8000:
         prompt = prompt[:8000]
-        
+        app_logger.debug("Trimmed prompt from %s to 8000 chars", original_len)
+
     payload = {
         "model": "deepseek-chat",
         "temperature": 0,
         "messages": [{"role": "user", "content": prompt}]
     }
-    
+    app_logger.info("DeepSeek API request: prompt_chars=%s model=%s", len(prompt), payload["model"])
+    api_start = time.time()
+
     try:
         response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=45)  # Increased timeout
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        api_duration = time.time() - api_start
+        content = response.json()["choices"][0]["message"]["content"]
+        app_logger.info("DeepSeek API response: status=%s duration=%.3fs response_chars=%s",
+                        response.status_code, api_duration, len(content))
+        app_logger.debug("DeepSeek raw response head: %s",
+                         content[:300].replace("\n", " ") + ("..." if len(content) > 300 else ""))
+        return content
     except requests.exceptions.Timeout:
         # Special handling for timeout errors
-        logging.warning("DeepSeek API timed out. Generating fallback response...")
+        app_logger.warning("DeepSeek API timed out after %.3fs. Generating fallback response...",
+                           time.time() - api_start)
         
         # Generate a fallback response to keep the application running
         if "match percentage" in prompt.lower():
@@ -395,24 +552,29 @@ def get_deepseek_response(prompt):
                 phone = re.sub(r'\D', '', phone_match.group(0))[-10:] if phone_match else "N/A"
                 
                 fallback_response = f"Percentage Match: {fallback_score}%\nMobile: {phone}\nEmail: {email}"
+                app_logger.info("Fallback computed: score=%s phone=%s email=%s",
+                                fallback_score, phone, email)
                 return fallback_response
-        
+
         # If all else fails, return a neutral response
+        app_logger.warning("Returning neutral fallback (50%) — no scoring context found")
         return "Percentage Match: 50%\nMobile: N/A\nEmail: N/A"
     except Exception as e:
         # Log error but don't expose full details to user
-        app_logger.error(f"DeepSeek API error: {str(e)}")
+        app_logger.error("DeepSeek API error after %.3fs: %s",
+                         time.time() - api_start, e, exc_info=True)
         raise
 
+@log_call
 def extract_percentage_and_contact(response_text):
     """Extract percentage match, mobile number, and email from API response with more robust patterns."""
     percentage = 0
     mobile = "N/A"
     email = "N/A"
-    
+
     # Check if response is an error or fallback
     if response_text.startswith("ERROR:"):
-        logging.warning(f"Cannot extract from error response: {response_text}")
+        app_logger.warning("Cannot extract from error response: %s", response_text[:200])
         return 0, "N/A", "N/A"
     
     # Extract percentage - more flexible pattern
@@ -438,7 +600,7 @@ def extract_percentage_and_contact(response_text):
             if percent_match:
                 percentage = int(percent_match.group(1))
     except Exception as e:
-        app_logger.error(f"Error extracting percentage: {str(e)}")
+        app_logger.error("Error extracting percentage: %s", e, exc_info=True)
         percentage = 0
     
     # Extract mobile number - more robust pattern
@@ -488,7 +650,7 @@ def extract_percentage_and_contact(response_text):
                     if len(digits_only) >= 10:
                         mobile = digits_only[-10:]  # Get last 10 digits
     except Exception as e:
-        app_logger.error(f"Error extracting mobile: {str(e)}")
+        app_logger.error("Error extracting mobile: %s", e, exc_info=True)
         mobile = "N/A"
         
     # Extract email - more robust pattern
@@ -514,14 +676,17 @@ def extract_percentage_and_contact(response_text):
                         email = email_text
                     break
     except Exception as e:
-        app_logger.error(f"Error extracting email: {str(e)}")
+        app_logger.error("Error extracting email: %s", e, exc_info=True)
         email = "N/A"
         
+    app_logger.info("Parsed response: percentage=%s mobile=%s email=%s",
+                    percentage, mobile, email)
     return percentage, mobile, email
 
 # Replace your process_resume function with this updated version
 # that uses proper JSON logging
 
+@log_call
 def process_resume(args):
     """
     Process a single document:
@@ -533,99 +698,149 @@ def process_resume(args):
     uploaded_file, job_description = args
     filename = uploaded_file.name
     rechecked = False
+    overall_start = time.time()
+    app_logger.info("=== process_resume START: %s (size=%s bytes) ===",
+                    filename, len(uploaded_file.getvalue()))
     try:
         # First-pass extraction
         resume_text = extract_text(uploaded_file)
+        app_logger.debug("Resume text head for %s: %s",
+                         filename,
+                         resume_text[:200].replace("\n", " ") + ("..." if len(resume_text) > 200 else ""))
         # Get selected role from session state (if none, default prompt will be used)
         role = st.session_state.get("selected_role", None)
+        app_logger.info("Normal-mode scoring for %s (role=%s)", filename, role)
         prompt_normal = get_role_specific_prompt(role, job_description, resume_text, mode="normal", include_contact_info=True)
         response_text = get_deepseek_response(prompt_normal)
         percentage, mobile, email = extract_percentage_and_contact(response_text)
-        
+
         # Log normal attempt - using proper JSON logging
         log_entry = {
             "filename": filename,
             "mode": "normal",
             "score": percentage,
-            "timestamp": time.time()
+            "mobile": mobile,
+            "email": email,
+            "role": role,
+            "timestamp": time.time(),
         }
-        app_logger.info(f"Processed {filename} with score {percentage}%")  # Regular log
+        app_logger.info("Normal-mode result for %s: score=%s mobile=%s email=%s",
+                        filename, percentage, mobile, email)
         json_log.write_entry(log_entry)  # JSON log
-        
+
         # Recheck if initial score is 0
         if percentage == 0:
             rechecked = True
+            app_logger.warning("Score=0 for %s; switching to DEEP mode", filename)
             if filename.lower().endswith(".pdf"):
                 method_texts = {
                     'vector': extract_pdf_vector(uploaded_file),
                     'ocr': extract_pdf_ocr(uploaded_file),
-                    'adaptive': extract_text(uploaded_file)
+                    'adaptive': extract_text(uploaded_file),
                 }
-                best_text = max(method_texts.values(), key=lambda t: len(t))
+                method_lengths = {m: len(t) for m, t in method_texts.items()}
+                app_logger.info("Deep-mode method char counts for %s: %s",
+                                filename, method_lengths)
+                best_method = max(method_texts, key=lambda m: len(method_texts[m]))
+                best_text = method_texts[best_method]
+                app_logger.info("Deep-mode best method for %s: %s (chars=%s)",
+                                filename, best_method, len(best_text))
                 prompt_deep = get_role_specific_prompt(role, job_description, best_text, mode="deep", include_contact_info=True)
                 response_text = get_deepseek_response(prompt_deep)
                 percentage, mobile, email = extract_percentage_and_contact(response_text)
             else:
+                app_logger.info("Deep-mode reusing original extracted text for non-PDF %s", filename)
                 prompt_deep = get_role_specific_prompt(role, job_description, resume_text, mode="deep", include_contact_info=True)
                 response_text = get_deepseek_response(prompt_deep)
                 percentage, mobile, email = extract_percentage_and_contact(response_text)
-            
+
             # Log deep-parsing attempt - using proper JSON logging
             log_entry = {
                 "filename": filename,
                 "mode": "deep",
                 "score": percentage,
-                "timestamp": time.time()
+                "mobile": mobile,
+                "email": email,
+                "role": role,
+                "timestamp": time.time(),
             }
-            app_logger.info(f"Reprocessed {filename} in deep mode with score {percentage}%")  # Regular log
+            app_logger.info("Deep-mode result for %s: score=%s mobile=%s email=%s",
+                            filename, percentage, mobile, email)
             json_log.write_entry(log_entry)  # JSON log
-        
+
         display_name = filename + (" [†]" if rechecked else "")
+        total_duration = time.time() - overall_start
+        app_logger.info("=== process_resume DONE: %s total_duration=%.3fs final_score=%s rechecked=%s ===",
+                        filename, total_duration, percentage, rechecked)
         return (display_name, percentage, mobile, email, uploaded_file)
     except Exception as e:
-        app_logger.error(f"Error processing {filename}: {str(e)}")  # Regular log
-        
+        app_logger.error("Error processing %s after %.3fs: %s",
+                         filename, time.time() - overall_start, e, exc_info=True)
+
         # Log error - using proper JSON logging
         log_entry = {
             "filename": filename,
             "mode": "error",
             "error": str(e),
-            "timestamp": time.time()
+            "error_type": type(e).__name__,
+            "timestamp": time.time(),
         }
         json_log.write_entry(log_entry)  # JSON log
-        
+
         return (filename, 0, "N/A", "N/A", uploaded_file)
 
+@log_call
 def process_documents_with_rate_limit(uploaded_files, job_description):
     """Process documents with rate limiting to avoid overwhelming the API."""
     results = []
-    
+    total_files = len(uploaded_files)
+    batch_size = 2
+    app_logger.info("Batch processing start: files=%s batch_size=%s jd_chars=%s",
+                    total_files, batch_size, len(job_description or ""))
+    batch_start = time.time()
+
     with st.spinner("Processing documents..."):
         # Reduce max_workers to avoid overwhelming the API
         with ThreadPoolExecutor(max_workers=2) as executor:  # Reduced from 5 to 2
             args = [(file, job_description) for file in uploaded_files]
-            
+
             # Process in batches to avoid too many concurrent requests
-            batch_size = 2
             for i in range(0, len(args), batch_size):
-                batch_args = args[i:i+batch_size]
+                batch_args = args[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                batch_total = (len(args) + batch_size - 1) // batch_size
+                app_logger.info("Batch %s/%s start (files: %s)",
+                                batch_num, batch_total,
+                                [a[0].name for a in batch_args])
+                b_start = time.time()
                 batch_results = list(executor.map(process_resume, batch_args))
                 results.extend(batch_results)
-                
+                app_logger.info("Batch %s/%s done in %.3fs",
+                                batch_num, batch_total, time.time() - b_start)
+
                 # Add a small delay between batches
                 if i + batch_size < len(args):
+                    app_logger.debug("Inter-batch sleep 2s")
                     time.sleep(2)
-    
+
+    app_logger.info("Batch processing complete: total_duration=%.3fs results=%s",
+                    time.time() - batch_start, len(results))
     return results
 
+@log_call
 def copy_file_to_folder(file_obj, filename, target_folder):
     """Copy the file from memory to the target folder."""
     if not os.path.exists(target_folder):
+        app_logger.info("Creating target folder: %s", target_folder)
         os.makedirs(target_folder)
     # Write file content to disk
-    with open(os.path.join(target_folder, filename), 'wb') as f:
+    dest = os.path.join(target_folder, filename)
+    with open(dest, 'wb') as f:
         f.write(file_obj.getvalue())
+    app_logger.info("Copied %s -> %s (size=%s bytes)",
+                    filename, dest, len(file_obj.getvalue()))
 
+@log_call
 def display_pdf(file_obj):
     """Create a base64 encoded version of the PDF for embedding in HTML."""
     # Pre-load the PDF data to cache it
@@ -645,12 +860,13 @@ def display_pdf(file_obj):
     '''
     return pdf_display
 
+@log_call
 def display_docx(file_obj):
     """Display DOCX file by converting to HTML."""
     with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
         tmp.write(file_obj.getvalue())
         tmp_path = tmp.name
-    
+
     try:
         # Create an HTML version for display
         doc = Document(tmp_path)
@@ -658,14 +874,18 @@ def display_docx(file_obj):
         for para in doc.paragraphs:
             html_content += f"<p>{para.text}</p>"
         html_content += "</div>"
-        
+
         # Clean up the temp file
         os.unlink(tmp_path)
+        app_logger.debug("DOCX rendered to HTML: paragraphs=%s html_chars=%s",
+                         len(doc.paragraphs), len(html_content))
         return html_content
     except Exception as e:
         os.unlink(tmp_path)
+        app_logger.error("DOCX display error: %s", e, exc_info=True)
         return f"<div class='error'>Error displaying document: {str(e)}</div>"
 
+@log_call
 def display_image(file_obj):
     """Display an image in HTML."""
     file_type = detect_file_type(file_obj)
@@ -674,6 +894,7 @@ def display_image(file_obj):
     return img_display
 
 # Another alternative - use a direct approach
+@log_call
 def show_pdf_direct(file_obj):
     """Show PDF directly using a simple approach"""
     # Get the PDF data and encode it
@@ -703,20 +924,22 @@ def show_pdf_direct(file_obj):
     )
 
 # Replace your PDF display logic with one of these approaches
+@log_call
 def display_resume(file_obj):
     """Display a resume based on its file type."""
     file_type = detect_file_type(file_obj)
-    
+
     if 'pdf' in file_type:
         # Try multiple approaches until one works
         try:
             # Option 1: Direct PDF display (simplest)
             show_pdf_direct(file_obj)
         except Exception as e:
+            app_logger.error("PDF display error for %s: %s", file_obj.name, e, exc_info=True)
             st.error(f"Error displaying PDF: {str(e)}")
             st.download_button(
-                "Download PDF instead", 
-                file_obj.getvalue(), 
+                "Download PDF instead",
+                file_obj.getvalue(),
                 file_name=file_obj.name,
                 mime="application/pdf"
             )
@@ -727,8 +950,9 @@ def display_resume(file_obj):
         html_content = display_image(file_obj)
         st.markdown(html_content, unsafe_allow_html=True)
     else:
+        app_logger.warning("Unsupported preview type %s for %s", file_type, file_obj.name)
         st.error(f"Unsupported file type for preview: {file_type}")
-        
+
     return None  # Return None since we're displaying directly
 
 # --- Streamlit UI ---
@@ -797,6 +1021,9 @@ if col11.button("TEV Analyst"):
     st.session_state.selected_role = "TEV Analyst"
 
 if st.session_state.selected_role:
+    if st.session_state.get("_last_logged_role") != st.session_state.selected_role:
+        app_logger.info("UI: role selected -> %s", st.session_state.selected_role)
+        st.session_state["_last_logged_role"] = st.session_state.selected_role
     st.info(f"Selected Role: {st.session_state.selected_role}")
 else:
     st.warning("⚠️ Please select a job role before proceeding.")
@@ -828,12 +1055,19 @@ if "preview_html" not in st.session_state:
 
 if st.button("Process Documents") and uploaded_files:
     if not job_description.strip():
+        app_logger.warning("UI: Process clicked without job description")
         st.warning("Please enter a job description")
         st.stop()
-    
+
+    app_logger.info("UI: Process Documents clicked | role=%s | files=%s | jd_chars=%s",
+                    st.session_state.selected_role,
+                    [f.name for f in uploaded_files],
+                    len(job_description))
     # Use the rate-limited processing function
     results = process_documents_with_rate_limit(uploaded_files, job_description)
     st.session_state.processed_results = results
+    app_logger.info("UI: Processing finished | results=%s | scores=%s",
+                    len(results), [r[1] for r in results])
     
 # Only display filtering and copying if we have processed results in session state
 if st.session_state.processed_results:
@@ -969,6 +1203,8 @@ if st.session_state.processed_results:
 
         with b2:
             if st.button("Copy Files to Folder", key="copy_button"):
+                app_logger.info("UI: Copy Files clicked | count=%s | target=%s | range=%s-%s",
+                                len(filtered), target_folder, min_score, max_score)
                 for item in filtered:
                     original_name = item["Filename"].replace(" [†]", "")
                     copy_file_to_folder(item["FileObj"], original_name, target_folder)
